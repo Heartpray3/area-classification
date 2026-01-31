@@ -1,0 +1,99 @@
+# =========================
+# Python basics
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+
+# =========================
+# Virtual environments
+# =========================
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# =========================
+# Jupyter / IPython
+# =========================
+.ipynb_checkpoints/
+.ipython/
+
+# =========================
+# ML artifacts / data
+# =========================
+data/
+datasets/
+raw_data/
+processed_data/
+*.csv
+*.tsv
+*.parquet
+*.h5
+*.hdf5
+
+# =========================
+# Trained models / checkpoints
+# =========================
+models/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.joblib
+*.pkl
+*.onnx
+
+# =========================
+# Logs & outputs
+# =========================
+logs/
+runs/
+wandb/
+mlruns/
+tensorboard/
+*.log
+
+# =========================
+# Experiment outputs
+# =========================
+outputs/
+results/
+figures/
+plots/
+
+# =========================
+# Caches
+# =========================
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# =========================
+# IDE / Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Environment variables / secrets
+# =========================
+.env
+.env.*
+secrets/
