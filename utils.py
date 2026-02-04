@@ -147,47 +147,16 @@ def encode_one_hot_types(df, feat_cols, prefix=None):
     return df
 
 
-def add_geometry_features(gdf, feature_cols, metric_epsg=6933):
-    """
-    gdf: GeoDataFrame en EPSG:4326
-    Ajoute:
-      - polygon_area_m2
-      - polygon_perimeter_m
-      - compactness (sans unité)
-    """
-    gdf["area_orig"] = gdf.geometry.area
-    gdf["perimeter_orig"] = gdf.geometry.length
-
-    # 1) reprojection métrique
-    # gdf_m = gdf.to_crs(epsg=metric_epsg)
-    gdf_m = gdf.copy()
-    # 2) calculs métriques
-    gdf_m["polygon_area_m2"] = gdf_m.geometry.area
-    gdf_m["polygon_perimeter_m"] = gdf_m.geometry.length
-
-    # 3) fallback pour les NaN
-    mask_nan = (
-            gdf_m["polygon_area_m2"].isna()
-            | gdf_m["polygon_perimeter_m"].isna()
-    )
-
-    gdf_m.loc[mask_nan, "polygon_area_m2"] = gdf.loc[mask_nan, "area_orig"]
-    gdf_m.loc[mask_nan, "polygon_perimeter_m"] = gdf.loc[mask_nan, "perimeter_orig"]
-
-    # 4) compacité
-    # gdf_m["compactness"] = (
-    #         4 * np.pi * gdf_m["polygon_area_m2"]
-    #         / (gdf_m["polygon_perimeter_m"] ** 2)
-    # )
-
-    feature_cols |= {"polygon_area_m2", "polygon_perimeter_m"}
-
-    return gdf_m
+def add_geometry_features(gdf, feature_cols):
+    gdf["area"] = gdf.geometry.area
+    gdf["perimeter"] = gdf.geometry.length
+    feature_cols |= {"area", "perimeter"}
+    return gdf
 
 
 
 def add_max_gap_between_sets(df, feat_cols):
-    out = df.copy()
+    out = df
     date_cols = [f"date{i}" for i in range(5)]
     status_cols = [f"change_status_date{i}" for i in range(5)]
 
@@ -229,7 +198,7 @@ def add_max_gap_between_sets(df, feat_cols):
 
 
 def add_last_state(df, feat_cols):
-    out = df.copy()
+    out = df
     date_cols = [f"date{i}" for i in range(5)]
     status_cols = [f"change_status_date{i}" for i in range(5)]
 
@@ -264,7 +233,7 @@ def add_last_state(df, feat_cols):
     return out
 
 def add_regressed_state(df, feat_cols):
-    out = df.copy()
+    out = df
     date_cols = [f"date{i}" for i in range(5)]
     status_cols = [f"change_status_date{i}" for i in range(5)]
 
