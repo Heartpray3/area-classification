@@ -159,8 +159,8 @@ def add_geometry_features(gdf, feature_cols, metric_epsg=6933):
     gdf["perimeter_orig"] = gdf.geometry.length
 
     # 1) reprojection métrique
-    gdf_m = gdf.to_crs(epsg=metric_epsg)
-
+    # gdf_m = gdf.to_crs(epsg=metric_epsg)
+    gdf_m = gdf.copy()
     # 2) calculs métriques
     gdf_m["polygon_area_m2"] = gdf_m.geometry.area
     gdf_m["polygon_perimeter_m"] = gdf_m.geometry.length
@@ -175,18 +175,18 @@ def add_geometry_features(gdf, feature_cols, metric_epsg=6933):
     gdf_m.loc[mask_nan, "polygon_perimeter_m"] = gdf.loc[mask_nan, "perimeter_orig"]
 
     # 4) compacité
-    gdf_m["compactness"] = (
-            4 * np.pi * gdf_m["polygon_area_m2"]
-            / (gdf_m["polygon_perimeter_m"] ** 2)
-    )
+    # gdf_m["compactness"] = (
+    #         4 * np.pi * gdf_m["polygon_area_m2"]
+    #         / (gdf_m["polygon_perimeter_m"] ** 2)
+    # )
 
-    feature_cols |= {"polygon_area_m2", "polygon_perimeter_m", "compactness"}
+    feature_cols |= {"polygon_area_m2", "polygon_perimeter_m"}
 
     return gdf_m
 
 
 
-def add_max_gap_between_sets(df):
+def add_max_gap_between_sets(df, feat_cols):
     out = df.copy()
     date_cols = [f"date{i}" for i in range(5)]
     status_cols = [f"change_status_date{i}" for i in range(5)]
@@ -195,53 +195,36 @@ def add_max_gap_between_sets(df):
     statuses = out[status_cols]
 
     def row_max_gap(row_dates, row_statuses):
-        set1_dates = {}
-        set2_dates = {}
-        map_gap = {date:status for date, status in zip(row_dates, row_statuses)}
-        sorted_dates = sorted(row_dates)
-        inv_sorted_dates = sorted(row_dates, reverse=True)
-        d_min = None
-        s_min = map_gap[sorted_dates[0]]
-        d_max = None
-        s_max = map_gap[inv_sorted_dates[0]]
 
-        for d in sorted_dates:
-            if pd.isna(d) or pd.isna(map_gap[d]):
-                continue
-            if map_gap[d] != s_min:
-                d_min = d
-                s_min = map_gap[d_min]
-                break
+        # map_gap = { for d, s in zip(row_dates, row_statuses) if not pd.isna(d) and not pd.isna(s)}
+        pair = [
+            (d, s)
+            for i, (d, s) in enumerate(zip(row_dates, row_statuses))
+            if not pd.isna(d) and not pd.isna(s)
+        ]
+        sorted_dates = sorted(pair, key=lambda x: x[0])
+        if len(sorted_dates) <= 1:
+            return 0.0, 0.0, 0.0
 
-        for d in inv_sorted_dates:
-            if pd.isna(d) or pd.isna(map_gap[d]):
-                continue
-            if map_gap[d] != s_max:
-                d_max = d
-                s_max = map_gap[d]
-                break
+        changes = []
+        for i in range(len(sorted_dates)-1):
+            d1, s1 = sorted_dates[i]
+            d2, s2 = sorted_dates[i+1]
+            if s1 != s2:
+                changes.append(((d2 - d1).total_seconds() / 86400.0, STATUS_ORDER[s2]-STATUS_ORDER[s1]))
+        if len(changes) == 0:
+            return 0.0, 0.0, 0.0
+        return len(changes), *max(changes, key=lambda x: x[1])
 
-
-        if d_max is None and d_min is None:
-            return 0.0
-        # elif d_max < d_min:
-        return abs(d_min - d_max).total_seconds() / 86400.0 
-
-
-        # max |t2 - t1|
-        max_gap = min(
-            abs((t2 - t1).total_seconds())
-            for t1 in set1_dates.values()
-            for t2 in set2_dates.values()
-        )
-
-        return max_gap / 86400.0  # en jours
-
-    out["pre_post_construction_time_gap_days"] = [
+    date_changes = np.array([
         row_max_gap(d, s)
         for d, s in zip(dates.to_numpy(), statuses.to_numpy())
-    ]
+    ])
 
+    cols = ["nb_changes", "nb_days_max_change", "change_gradiant"]
+    for i, c in enumerate(cols):
+        out[c] = date_changes[:, i]
+    feat_cols |= set(cols)
     return out
 
 

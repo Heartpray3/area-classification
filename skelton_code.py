@@ -10,6 +10,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
 from sklearn.kernel_approximation import RBFSampler
 from sklearn.linear_model import SGDClassifier
+from sklearn.naive_bayes import BernoulliNB, MultinomialNB
+from sklearn.ensemble import RandomForestClassifier
+
 from sklearn.model_selection import GridSearchCV, StratifiedKFold, train_test_split
 
 # from area_classif import best_model
@@ -21,19 +24,21 @@ change_type_map = {
 }
 
 # --- Read geojsons
-train_df = gpd.read_file('train.geojson', index_col=0)
-train_df = train_df.set_crs("OGC:CRS84", allow_override=True)
+train_df = gpd.read_file('train.geojson')
+# train_df = train_df.set_crs("OGC:CRS84", allow_override=True)
 
-test_df  = gpd.read_file('test.geojson', index_col=0)
-test_df = test_df.set_crs("OGC:CRS84", allow_override=True)
+test_df  = gpd.read_file('test.geojson')
+# test_df = test_df.set_crs("OGC:CRS84", allow_override=True)
 
 feature_cols = set()
 
 train_df = encode_one_hot_types(train_df, feature_cols)
 test_df  = encode_one_hot_types(test_df, feature_cols)
 
-train_df = add_geometry_features(train_df, feature_cols)
-test_df  = add_geometry_features(test_df, feature_cols)
+# train_df = add_geometry_features(train_df, feature_cols)
+# test_df  = add_geometry_features(test_df, feature_cols)
+train_df = add_max_gap_between_sets(train_df, feature_cols)
+test_df = add_max_gap_between_sets(test_df, feature_cols)
 
 train_df = add_last_state(train_df, feature_cols)
 test_df  = add_last_state(test_df, feature_cols)
@@ -41,14 +46,25 @@ test_df  = add_last_state(test_df, feature_cols)
 train_df = add_regressed_state(train_df, feature_cols)
 test_df  = add_regressed_state(test_df, feature_cols)
 
-feature_cols = list(feature_cols)
+img_c = [c for c in train_df.columns if c.startswith("img")]
+feature_cols = sorted(set(list(feature_cols)))
 
-# --- X / y
-train_x = train_df[feature_cols].to_numpy(dtype=float)
-test_x  = test_df[feature_cols].to_numpy(dtype=float)
 train_y = train_df["change_type"].map(change_type_map).to_numpy()
 
+
+
+train_df = train_df.reindex(columns=feature_cols, fill_value=0)
+test_df  = test_df.reindex(columns=feature_cols, fill_value=0)
+
+train_df = train_df.fillna(0)
+test_df  = test_df.fillna(0)
+
+# --- X / y
+train_x = train_df.to_numpy(dtype=float)
+test_x  = test_df.to_numpy(dtype=float)
+
 print(train_x.shape, train_y.shape, test_x.shape)
+print(len(img_c), len(feature_cols), img_c)
 
 # # --- 1) Sous-échantillon stratifié (pour chercher vite)
 # # Mets 20k-80k selon ton CPU; 50k est souvent un bon compromis.
@@ -109,24 +125,65 @@ print(train_x.shape, train_y.shape, test_x.shape)
 # print("BEST PARAMS:", gs.best_params_)
 # print("BEST CV F1:", gs.best_score_)
 #
-# # --- 3) Refit sur tout le train avec le meilleur modèle
-# best_model = gs.best_estimator_
-
-best_model = Pipeline([
-    ("scaler", StandardScaler(with_mean=False)),
-    ("rbf", RBFSampler(
-        gamma=0.01,
-        n_components=2000,
-        random_state=0
-    )),
-    ("clf", SGDClassifier(
-        loss="hinge",
-        alpha=1e-5,
-        max_iter=8000,
-        tol=1e-3,
-        random_state=0
-    ))
+pipe = Pipeline([
+    ("clf", BernoulliNB())  # placeholder
 ])
+
+param_grid = [
+    # ===== BernoulliNB =====
+    {
+        "clf": [BernoulliNB()],
+        "clf__alpha": [0.01, 0.1, 0.5, 1.0],
+        "clf__binarize": [None, 0.0],   # None si déjà binaire, 0.0 sinon
+        "clf__fit_prior": [True, False],
+    },
+
+    # ===== MultinomialNB =====
+    {
+        "clf": [MultinomialNB()],
+        "clf__alpha": [0.01, 0.1, 0.5, 1.0],
+        "clf__fit_prior": [True, False],
+    }
+]
+
+
+cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=0)
+
+gs = GridSearchCV(
+    pipe, param_grid,
+    scoring="f1_macro",
+    cv=cv,
+    n_jobs=-1,
+    verbose=3,
+    refit=True
+)
+
+gs.fit(train_x, train_y)
+
+# # --- 3) Refit sur tout le train avec le meilleur modèle
+best_model = gs.best_estimator_
+
+print("\n===== BEST MODEL =====")
+print(gs.best_estimator_)
+
+print("BEST PARAMS:", gs.best_params_)
+print("BEST CV F1:", gs.best_score_)
+
+# best_model = Pipeline([
+#     ("scaler", StandardScaler(with_mean=False)),
+#     ("rbf", RBFSampler(
+#         gamma=0.01,
+#         n_components=2000,
+#         random_state=0
+#     )),
+#     ("clf", SGDClassifier(
+#         loss="hinge",
+#         alpha=1e-5,
+#         max_iter=8000,
+#         tol=1e-3,
+#         random_state=0
+#     ))
+# ])
 
 cross_validation(3, best_model, train_x, train_y)
 
