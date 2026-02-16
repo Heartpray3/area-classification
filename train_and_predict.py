@@ -38,8 +38,8 @@ CACHE_DIR = "feature_cache"
 # Load data
 # ---------------------------------------------------------------------------
 def load_data():
-    train_df = gpd.read_file("train.geojson")
-    test_df = gpd.read_file("test.geojson")
+    train_df = gpd.read_parquet("train_preprocessed.parquet")
+    test_df = gpd.read_parquet("test_preprocessed.parquet")
     return train_df, test_df
 
 
