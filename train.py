@@ -83,15 +83,43 @@ for c in train_df.columns:
 IMG_PATTERNS = (
     "img_red_mean_t", "img_green_mean_t", "img_blue_mean_t",
     "img_red_std_t", "img_green_std_t", "img_blue_std_t",
-    "brightness_t", "texture_t", "exg_t", "saturation_t", "exr_t",
+
+    #"brightness_t", "texture_t", "exg_t", "saturation_t", "exr_t",
+
+#     # --- NOUVELLES FEATURES DE TRANSITION (Deltas et Vélocités) ---
+    
+#     # Transition 0 -> 1
+#     "delta_mean_red_0_1", "delta_mean_green_0_1", "delta_mean_blue_0_1",
+#     "delta_std_red_0_1", "delta_std_green_0_1", "delta_std_blue_0_1",
+#     "vel_mean_red_0_1", "vel_mean_green_0_1", "vel_mean_blue_0_1",
+#     "vel_std_red_0_1", "vel_std_green_0_1", "vel_std_blue_0_1",
+
+#     # Transition 1 -> 2
+#     "delta_mean_red_1_2", "delta_mean_green_1_2", "delta_mean_blue_1_2",
+#     "delta_std_red_1_2", "delta_std_green_1_2", "delta_std_blue_1_2",
+#     "vel_mean_red_1_2", "vel_mean_green_1_2", "vel_mean_blue_1_2",
+#     "vel_std_red_1_2", "vel_std_green_1_2", "vel_std_blue_1_2",
+
+#     # Transition 2 -> 3
+#     "delta_mean_red_2_3", "delta_mean_green_2_3", "delta_mean_blue_2_3",
+#     "delta_std_red_2_3", "delta_std_green_2_3", "delta_std_blue_2_3",
+#     "vel_mean_red_2_3", "vel_mean_green_2_3", "vel_mean_blue_2_3",
+#     "vel_std_red_2_3", "vel_std_green_2_3", "vel_std_blue_2_3",
+
+#     # Transition 3 -> 4
+#     "delta_mean_red_3_4", "delta_mean_green_3_4", "delta_mean_blue_3_4",
+#     "delta_std_red_3_4", "delta_std_green_3_4", "delta_std_blue_3_4",
+#     "vel_mean_red_3_4", "vel_mean_green_3_4", "vel_mean_blue_3_4",
+#     "vel_std_red_3_4", "vel_std_green_3_4", "vel_std_blue_3_4",
+
 )
-IMG_DELTA_PREFIXES = ("delta_brightness", "delta_texture", "delta_exg", "delta_saturation", "delta_exr")
+#IMG_DELTA_PREFIXES = ("delta_brightness", "delta_texture", "delta_exg", "delta_saturation", "delta_exr")
 
 IMG_COLS = []
 for c in train_df.columns:
-    if c.startswith(IMG_PATTERNS) or c.startswith(IMG_DELTA_PREFIXES):
-        if c in test_df.columns:
-            IMG_COLS.append(c)
+     if c.startswith(IMG_PATTERNS):
+         if c in test_df.columns:
+             IMG_COLS.append(c)
 
 # 4) Time features (from process_time_between_statuses)
 TIME_PREFIXES = (
@@ -198,12 +226,15 @@ for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y), 1):
     X_tr, X_va = X.iloc[tr_idx], X.iloc[va_idx]
     y_tr, y_va = y[tr_idx], y[va_idx]
 
+    fold_params = dict(cv_params)
+    fold_params["early_stopping_rounds"] = EARLY_STOP
+
     clf = XGBClassifier(**cv_params)
     clf.fit(
         X_tr, y_tr,
         eval_set=[(X_va, y_va)],
         verbose=False,
-        early_stopping_rounds=EARLY_STOP,
+        #early_stopping_rounds=EARLY_STOP,
     )
 
     pred = np.argmax(clf.predict_proba(X_va), axis=1)
