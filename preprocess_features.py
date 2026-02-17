@@ -291,6 +291,47 @@ def process_timeline(row):
 
     return pd.Series(res)
 
+def add_color_transition_velocity_features(df):
+    """
+    Crée 48 colonnes : 24 de deltas et 24 de vélocité (delta / jours).
+    Transitions entre les dates 1, 2, 3, 4 et 5.
+    """
+    channels = ['red', 'green', 'blue']
+    metrics = ['mean', 'std']
+    
+    # Assurer que les dates sont au format datetime pour le calcul
+    for d in range(5):
+        df[f'date{d}'] = pd.to_datetime(df[f'date{d}'], errors='coerce')
+    
+    # Parcourir les 4 transitions (1->2, 2->3, 3->4, 4->5)
+    for i in range(0, 4):
+        j = i + 1
+        
+        # Calcul de l'intervalle en jours (Δt)
+        # Rappel : img_..._date1 correspond à la colonne date0
+        delta_days = (df[f'date{j}'] - df[f'date{i}']).dt.days
+        # Remplacer 0 par 1 pour éviter la division par zéro si deux dates sont identiques
+        delta_days = delta_days.replace(0, 1)
+        
+        for metric in metrics:
+            for channel in channels:
+                col_i = f'img_{channel}_{metric}_date{i}'
+                col_j = f'img_{channel}_{metric}_date{j}'
+                
+                delta_name = f'delta_{metric}_{channel}_{i}_{j}'
+                vel_name = f'vel_{metric}_{channel}_{i}_{j}'
+                
+                if col_i in df.columns and col_j in df.columns:
+                    # 1. Calcul du Delta (Variation brute)
+                    df[delta_name] = df[col_j] - df[col_i]
+                    
+                    # 2. Calcul de la Vélocité (Vitesse de changement par jour)
+                    df[vel_name] = df[delta_name] / delta_days
+                
+    return df
+
+
+
 
 # =========================
 # 4) One-hot tags CLEAN (ignore N/A/N,A)
@@ -398,6 +439,12 @@ def preprocess_geojson(path: str, is_train: bool) -> pd.DataFrame:
     gdf = reorder_dates(gdf, errors="coerce")  # clean reorder blocks date0..4
     timeline_features = gdf.apply(process_timeline, axis=1)
     gdf = pd.concat([gdf, timeline_features], axis=1)
+
+    # -- Ajout des COULEURS ET VÉLOCITÉ ---
+    print('Ajout des features de couleur et vélocité...')
+    gdf = add_color_transition_velocity_features(gdf)
+
+    
 
     # One-hot tags clean (NO N/A/N,A cols)
     print("One-hot tags clean...")
