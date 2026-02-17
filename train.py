@@ -1,32 +1,20 @@
 """
-train.py
+train.py - Test accuracy des features sur le TRAIN SET
 
-Loads precomputed parquet features:
-- train_features.parquet
-- test_features.parquet
-
-Trains XGBoost with:
-- Geometry features
-- One-hot (urban_/geo_)
-- Image timeline features (per-t + deltas)
-- Time features (days_to_, delta_days_, phase_days_, transitions, etc.)
-- Status flags per date (status_<STATUS>_date0..4)
-
-Cross-validation:
-- 3-fold StratifiedKFold
-- F1 weighted (primary)
-- Early stopping for speed
-- Prints per-class F1 + confusion matrix per fold
+Teste les nouvelles features en faisant une cross-validation sur le train set.
+Objectif: valider que les features ameliorent l'accuracy avant de soumettre.
 
 Outputs:
-- submission.csv
+- model.pkl (modele final entraine)
+- Resultats CV affiches en console (accuracy, F1 macro/weighted)
 """
 
 import numpy as np
 import pandas as pd
+import pickle
 
 from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import f1_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix, balanced_accuracy_score
 
 from xgboost import XGBClassifier
 
@@ -168,9 +156,9 @@ if bad_cols:
 # XGBoost config
 # ---------------------------
 model_params = dict(
-    n_estimators=1000,
-    max_depth=10,
-    learning_rate=0.1,
+    n_estimators=200,
+    max_depth=6,
+    learning_rate=0.2,
     objective="multi:softprob",
     num_class=num_classes,
     eval_metric="mlogloss",
@@ -180,18 +168,19 @@ model_params = dict(
     missing=np.nan,
 )
 
-# For CV: big n_estimators + early stopping (fast)
+# For CV: use fewer estimators for speed
 cv_params = dict(model_params)
-cv_params.update(n_estimators=5000)
-EARLY_STOP = 200
+cv_params.update(n_estimators=150)
 
 
 # ---------------------------
-# 3-Fold Cross-validation (F1 WEIGHTED)
+# 2-Fold Cross-validation (F1 WEIGHTED) - FAST!
 # ---------------------------
-skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+skf = StratifiedKFold(n_splits=2, shuffle=True, random_state=42)
 
 fold_scores = []
+fold_accuracies = []
+fold_balanced_accuracies = []
 per_class_f1 = []
 
 for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y), 1):
@@ -199,17 +188,17 @@ for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y), 1):
     y_tr, y_va = y[tr_idx], y[va_idx]
 
     clf = XGBClassifier(**cv_params)
-    clf.fit(
-        X_tr, y_tr,
-        eval_set=[(X_va, y_va)],
-        verbose=False,
-        early_stopping_rounds=EARLY_STOP,
-    )
+    clf.fit(X_tr, y_tr)
 
     pred = np.argmax(clf.predict_proba(X_va), axis=1)
 
+    acc = accuracy_score(y_va, pred)
     f1_w = f1_score(y_va, pred, average="weighted")
+    balanced_acc = balanced_accuracy_score(y_va, pred)
+    
+    fold_accuracies.append(acc)
     fold_scores.append(f1_w)
+    fold_balanced_accuracies.append(balanced_acc)
 
     rep = classification_report(
         y_va, pred,
@@ -223,27 +212,34 @@ for fold, (tr_idx, va_idx) in enumerate(skf.split(X, y), 1):
 
     cm = confusion_matrix(y_va, pred, labels=list(range(num_classes)))
 
-    print(f"\n========== Fold {fold}/3 ==========")
-    print(f"best_iteration : {clf.best_iteration}")
-    print(f"F1 weighted    : {f1_w:.5f}")
+    print(f"\n========== Fold {fold}/2 ==========")
+    print(f"[OK] Accuracy          : {acc:.4f} ({acc*100:.2f}%)")
+    print(f"[OK] Balanced Accuracy : {balanced_acc:.4f}")
+    print(f"[OK] F1 Weighted       : {f1_w:.4f}")
 
     print("\nPer-class F1:")
     for name in label_names:
-        print(f"{name:14s}: {rep[name]['f1-score']:.5f}")
+        print(f"  {name:14s}: {rep[name]['f1-score']:.4f}")
 
     print("\nConfusion matrix (rows=true, cols=pred):")
     print(cm)
 
+fold_accuracies = np.array(fold_accuracies, dtype=float)
 fold_scores = np.array(fold_scores, dtype=float)
+fold_balanced_accuracies = np.array(fold_balanced_accuracies, dtype=float)
 per_class_f1 = np.array(per_class_f1, dtype=float)
 
-print("\n==============================")
-print(f"CV F1 WEIGHTED = {fold_scores.mean():.5f} ± {fold_scores.std():.5f}")
-print("==============================\n")
-
-print("Mean per-class F1 across folds:")
-for i, name in enumerate(label_names):
-    print(f"{name:14s}: {per_class_f1[:, i].mean():.5f}")
+print("\n" + "="*50)
+print("RESULTATS CROSS-VALIDATION (Dataset desequilibre)")
+print("="*50)
+print(f"Accuracy            : {fold_accuracies.mean():.4f} +/- {fold_accuracies.std():.4f}")
+print(f"Balanced Accuracy   : {fold_balanced_accuracies.mean():.4f} +/- {fold_balanced_accuracies.std():.4f}")
+print(f"F1 Weighted         : {fold_scores.mean():.4f} +/- {fold_scores.std():.4f}")
+print("="*50)
+print("\nMetriques pertinentes pour donnees desequilibrees:")
+print("   - Accuracy: Performance globale")
+print("   - Balanced Accuracy: Moyenne de recall par classe (immunise au desequilibre)")
+print("   - F1 Weighted: F1 pondere par support (robuste au desequilibre)")
 
 
 # ---------------------------
@@ -252,14 +248,15 @@ for i, name in enumerate(label_names):
 final_clf = XGBClassifier(**model_params)
 final_clf.fit(X, y)
 
-pred_y_int = np.argmax(final_clf.predict_proba(X_test), axis=1)
-pred_y = pd.Series(pred_y_int).map(inv_target_mapping).to_numpy()
-
 # ---------------------------
-# Save submission
+# Save model to pickle
 # ---------------------------
-pred_df = pd.DataFrame({"change_type": pred_y}, index=test_df.index)
-pred_df.index.name = "Id"
-pred_df.to_csv("submission.csv")
+import pickle
+with open('model.pkl', 'wb') as f:
+    pickle.dump(final_clf, f)
+print("[OK] Saved: model.pkl")
 
-print("\nSaved: submission.csv")
+print("\n[DONE] Script termine!")
+print("Le modele est entraine et pret pour calculate_accuracy.py")
+
+

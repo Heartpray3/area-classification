@@ -7,6 +7,7 @@ Train + Test GeoJSON -> Parquet (ONLY parquet)
 - reorder_dates(): CLEAN (date0..4 + reorder all *date0..4 blocks)
 - timeline features (uses img_*_date0..4)
 - one-hot tags CLEAN: ignore N/A/N,A + strip spaces, no flags, no tag_count
+- urban/geo derived features (density score, has_water, has_farms, etc.)
 - spatial features in meters using estimate_utm_crs()
 
 Outputs:
@@ -48,18 +49,7 @@ def process_time_between_statuses(row, max_points=5) -> pd.Series:
     """
     Encode time deltas between statuses.
     Uses date0..date4 + change_status_date0..4 (already cleaned/reordered).
-
-    Features produced:
-    - timeline_len
-    - total_duration_days
-    - days_to_<STATUS>  (from first observed date to first time STATUS appears, else -1)
-    - delta_days_i      (days between step i and i+1 for i=1..4, else 0)
-    - transition_a_to_b (count of observed transitions, compressed)
-    - phase_days_<phase> (sum of days spent in that phase across transitions)
-    - prior_construction_present (0/1)
-    - prior_construction_before_cleared (0/1)  # can hint demolition/redo
     """
-    # 1) build and sort timeline
     timeline = []
     for i in range(max_points):
         dt = row.get(f"date{i}")
@@ -74,7 +64,6 @@ def process_time_between_statuses(row, max_points=5) -> pd.Series:
 
     timeline.sort(key=lambda x: x[0])
 
-    # init outputs
     out = {}
     out["timeline_len"] = int(len(timeline))
     out["total_duration_days"] = 0.0
@@ -88,8 +77,6 @@ def process_time_between_statuses(row, max_points=5) -> pd.Series:
     out["prior_construction_present"] = 0
     out["prior_construction_before_cleared"] = 0
 
-    # transitions count features (sparse but informative)
-    # (tu peux en garder juste quelques unes si ça fait trop de colonnes)
     for a in ALL_STATUSES:
         for b in ALL_STATUSES:
             out[f"tr_{a.replace(' ', '_')}_to_{b.replace(' ', '_')}"] = 0
@@ -97,23 +84,18 @@ def process_time_between_statuses(row, max_points=5) -> pd.Series:
     if not timeline:
         return pd.Series(out)
 
-    # 2) compress consecutive duplicate statuses (avoid artificial 0-day transitions)
     comp = [timeline[0]]
     for dt, st in timeline[1:]:
         if st == comp[-1][1]:
-            # keep earliest date for that status block (or you can keep latest; but earliest is fine)
             continue
         comp.append((dt, st))
 
-    # 3) basic durations
     out["timeline_len"] = int(len(comp))
     out["total_duration_days"] = float((comp[-1][0] - comp[0][0]).days)
 
-    # delta between steps (up to 4)
     for i in range(min(len(comp) - 1, max_points - 1)):
         out[f"delta_days_{i+1}"] = float((comp[i+1][0] - comp[i][0]).days)
 
-    # 4) days_to_status (first occurrence)
     first_date = comp[0][0]
     seen = set()
     for dt, st in comp:
@@ -121,10 +103,8 @@ def process_time_between_statuses(row, max_points=5) -> pd.Series:
             out[f"days_to_{st.replace(' ', '_')}"] = float((dt - first_date).days)
             seen.add(st)
 
-    # 5) transitions + phase time allocation
     out["prior_construction_present"] = int(any(st == "Prior Construction" for _, st in comp))
 
-    # simple demolition-ish hint: Prior Construction occurs before Land Cleared
     idx_prior = next((i for i, (_, st) in enumerate(comp) if st == "Prior Construction"), None)
     idx_cleared = next((i for i, (_, st) in enumerate(comp) if st == "Land Cleared"), None)
     out["prior_construction_before_cleared"] = int(
@@ -162,12 +142,10 @@ def _geom_has_nonfinite_coords(geom) -> bool:
     if geom is None or geom.is_empty:
         return True
     try:
-        # Point/LineString have .coords
         coords = np.asarray(geom.coords, dtype=float)
         return coords.size == 0 or (not np.isfinite(coords).all())
     except Exception:
         try:
-            # Use __geo_interface__ coordinates (works for Polygon/MultiPolygon)
             gi = geom.__geo_interface__
             coords = gi.get("coordinates", None)
             if coords is None:
@@ -202,9 +180,6 @@ def safe_convex_area(geom) -> float:
 # =========================
 
 def process_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """
-    Renomme img_*_date1..date5 -> img_*_date0..date4 (décalage -1).
-    """
     df = gdf.copy()
     rename_map = {}
 
@@ -225,11 +200,6 @@ def process_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 # =========================
 
 def reorder_dates(df: pd.DataFrame, date_format="%d-%m-%Y", errors="coerce") -> pd.DataFrame:
-    """
-    Trie date0..date4 (NaT à la fin) et réordonne toutes les colonnes finissant par date0..date4
-    avec la même permutation ligne-par-ligne.
-    Puis ffill horizontal sur change_status_date0..4 (si au moins une date existe).
-    """
     out = df.copy()
     date_cols = [f"date{i}" for i in range(5)]
     date_cols = [c for c in date_cols if c in out.columns]
@@ -249,7 +219,7 @@ def reorder_dates(df: pd.DataFrame, date_format="%d-%m-%Y", errors="coerce") -> 
 
     bases = {}
     for c in related_cols:
-        base = c[:-1]  # enlève le dernier char (0..4)
+        base = c[:-1]
         bases.setdefault(base, []).append(c)
 
     for base in bases:
@@ -453,30 +423,16 @@ def one_hot_tags(df: pd.DataFrame, col: str, tags: list[str], prefix: str) -> pd
 
     for tag in tags:
         safe = tag.replace(" ", "_")
-        out[f"{prefix}_{safe}"] = out[col].apply(lambda x: has_tag(x, tag)).astype("int8")
+        out[f"{prefix}_{safe}"] = out[col].apply(lambda x, t=tag: has_tag(x, t)).astype("int8")
 
     return out
 
 
-ALL_STATUSES = [
-    "Greenland",
-    "Land Cleared",
-    "Prior Construction",
-    "Excavation",
-    "Materials Dumped",
-    "Materials Introduced",
-    "Construction Started",
-    "Construction Midway",
-    "Construction Done",
-    "Operational",
-]
+# =========================
+# 4b) Status one-hots per date
+# =========================
 
 def add_status_onehots_per_date(df: pd.DataFrame, statuses=ALL_STATUSES, n_dates=5) -> pd.DataFrame:
-    """
-    Create 0/1 flags: status_<STATUS>_date<i> for i=0..4.
-    Example: status_Land_Cleared_date3
-    Unknown / NaN -> all zeros.
-    """
     out = df.copy()
 
     def norm_status(x):
@@ -497,6 +453,59 @@ def add_status_onehots_per_date(df: pd.DataFrame, statuses=ALL_STATUSES, n_dates
 
     return out
 
+
+# =========================
+# 4c) Urban / Geo derived features
+# =========================
+
+URBAN_DENSITY = {
+    "Rural": 0, "N,A": 1,
+    "Urban Slum": 2, "Sparse Urban": 3,
+    "Dense Urban": 4, "Industrial": 4,
+}
+
+def add_urban_geo_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Features dérivées de urban_type et geography_type :
+    - urban_density_score (ordinal 0-4)
+    - n_urban_tags, n_geo_tags
+    - has_water, has_dense_forest, has_farms, is_rural
+    """
+    out = df.copy()
+
+    def _urban_density(x):
+        tags = _split_tags_special(x)
+        if not tags:
+            return 1
+        return max(URBAN_DENSITY.get(t, 1) for t in tags)
+
+    out["urban_density_score"] = out["urban_type"].apply(_urban_density).astype("int8")
+
+    out["n_urban_tags"] = out["urban_type"].apply(
+        lambda x: len(_split_tags_special(x)) if isinstance(x, str) and x.strip() != "N,A" else 0
+    ).astype("int8")
+
+    out["n_geo_tags"] = out["geography_type"].apply(
+        lambda x: len(_split_tags_special(x)) if isinstance(x, str) and x.strip() != "N,A" else 0
+    ).astype("int8")
+
+    out["has_water"] = out["geography_type"].apply(
+        lambda x: 1 if isinstance(x, str) and any(w in x for w in ["River", "Lakes", "Coastal"]) else 0
+    ).astype("int8")
+
+    out["has_dense_forest"] = out["geography_type"].apply(
+        lambda x: 1 if isinstance(x, str) and "Dense Forest" in x else 0
+    ).astype("int8")
+
+    out["has_farms"] = out["geography_type"].apply(
+        lambda x: 1 if isinstance(x, str) and "Farms" in x else 0
+    ).astype("int8")
+
+    out["is_rural"] = out["urban_type"].apply(
+        lambda x: 1 if isinstance(x, str) and "Rural" in x else 0
+    ).astype("int8")
+
+    return out
 
 
 # =========================
@@ -571,13 +580,17 @@ def preprocess_geojson(path: str, is_train: bool) -> pd.DataFrame:
 
     time_features = gdf.apply(process_time_between_statuses, axis=1)
 
-    # NEW: 50 status flags (5 dates x 10 statuses)
+    # Status flags (5 dates x 10 statuses)
     gdf = add_status_onehots_per_date(gdf)
 
     gdf = pd.concat([gdf, time_features], axis=1)
 
     timeline_features = gdf.apply(process_timeline, axis=1)
     gdf = pd.concat([gdf, timeline_features], axis=1)
+
+    # Urban / Geo derived features
+    print("Urban/Geo derived features...")
+    gdf = add_urban_geo_features(gdf)
 
     # One-hot tags clean (NO N/A/N,A cols)
     print("One-hot tags clean...")
