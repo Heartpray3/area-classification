@@ -20,6 +20,138 @@ import pandas as pd
 import geopandas as gpd
 from shapely.validation import make_valid
 
+ALL_STATUSES = [
+    "Greenland",
+    "Land Cleared",
+    "Prior Construction",
+    "Excavation",
+    "Materials Dumped",
+    "Materials Introduced",
+    "Construction Started",
+    "Construction Midway",
+    "Construction Done",
+    "Operational",
+]
+
+STATUS_TO_IDX = {s: i for i, s in enumerate(ALL_STATUSES)}
+
+PHASES = {
+    "pre": {"Greenland", "Prior Construction"},
+    "site_prep": {"Land Cleared", "Excavation"},
+    "materials": {"Materials Dumped", "Materials Introduced"},
+    "construction": {"Construction Started", "Construction Midway", "Construction Done"},
+    "post": {"Operational"},
+}
+
+
+def process_time_between_statuses(row, max_points=5) -> pd.Series:
+    """
+    Encode time deltas between statuses.
+    Uses date0..date4 + change_status_date0..4 (already cleaned/reordered).
+
+    Features produced:
+    - timeline_len
+    - total_duration_days
+    - days_to_<STATUS>  (from first observed date to first time STATUS appears, else -1)
+    - delta_days_i      (days between step i and i+1 for i=1..4, else 0)
+    - transition_a_to_b (count of observed transitions, compressed)
+    - phase_days_<phase> (sum of days spent in that phase across transitions)
+    - prior_construction_present (0/1)
+    - prior_construction_before_cleared (0/1)  # can hint demolition/redo
+    """
+    # 1) build and sort timeline
+    timeline = []
+    for i in range(max_points):
+        dt = row.get(f"date{i}")
+        st = row.get(f"change_status_date{i}")
+        if pd.isna(dt):
+            continue
+        dt = dt if isinstance(dt, pd.Timestamp) else pd.to_datetime(dt, errors="coerce")
+        if pd.isna(dt):
+            continue
+        st = "Unknown" if pd.isna(st) else str(st).strip()
+        timeline.append((dt, st))
+
+    timeline.sort(key=lambda x: x[0])
+
+    # init outputs
+    out = {}
+    out["timeline_len"] = int(len(timeline))
+    out["total_duration_days"] = 0.0
+    for s in ALL_STATUSES:
+        out[f"days_to_{s.replace(' ', '_')}"] = -1.0
+    for k in range(1, max_points):
+        out[f"delta_days_{k}"] = 0.0
+    for p in PHASES:
+        out[f"phase_days_{p}"] = 0.0
+
+    out["prior_construction_present"] = 0
+    out["prior_construction_before_cleared"] = 0
+
+    # transitions count features (sparse but informative)
+    # (tu peux en garder juste quelques unes si ça fait trop de colonnes)
+    for a in ALL_STATUSES:
+        for b in ALL_STATUSES:
+            out[f"tr_{a.replace(' ', '_')}_to_{b.replace(' ', '_')}"] = 0
+
+    if not timeline:
+        return pd.Series(out)
+
+    # 2) compress consecutive duplicate statuses (avoid artificial 0-day transitions)
+    comp = [timeline[0]]
+    for dt, st in timeline[1:]:
+        if st == comp[-1][1]:
+            # keep earliest date for that status block (or you can keep latest; but earliest is fine)
+            continue
+        comp.append((dt, st))
+
+    # 3) basic durations
+    out["timeline_len"] = int(len(comp))
+    out["total_duration_days"] = float((comp[-1][0] - comp[0][0]).days)
+
+    # delta between steps (up to 4)
+    for i in range(min(len(comp) - 1, max_points - 1)):
+        out[f"delta_days_{i+1}"] = float((comp[i+1][0] - comp[i][0]).days)
+
+    # 4) days_to_status (first occurrence)
+    first_date = comp[0][0]
+    seen = set()
+    for dt, st in comp:
+        if st in STATUS_TO_IDX and st not in seen:
+            out[f"days_to_{st.replace(' ', '_')}"] = float((dt - first_date).days)
+            seen.add(st)
+
+    # 5) transitions + phase time allocation
+    out["prior_construction_present"] = int(any(st == "Prior Construction" for _, st in comp))
+
+    # simple demolition-ish hint: Prior Construction occurs before Land Cleared
+    idx_prior = next((i for i, (_, st) in enumerate(comp) if st == "Prior Construction"), None)
+    idx_cleared = next((i for i, (_, st) in enumerate(comp) if st == "Land Cleared"), None)
+    out["prior_construction_before_cleared"] = int(
+        (idx_prior is not None) and (idx_cleared is not None) and (idx_prior < idx_cleared)
+    )
+
+    def phase_of(status: str) -> str | None:
+        for ph, statuses in PHASES.items():
+            if status in statuses:
+                return ph
+        return None
+
+    for i in range(len(comp) - 1):
+        a = comp[i][1]
+        b = comp[i+1][1]
+        days = float((comp[i+1][0] - comp[i][0]).days)
+
+        if a in STATUS_TO_IDX and b in STATUS_TO_IDX:
+            out[f"tr_{a.replace(' ', '_')}_to_{b.replace(' ', '_')}"] += 1
+
+        ph = phase_of(a)
+        if ph is not None:
+            out[f"phase_days_{ph}"] += max(days, 0.0)
+
+    return pd.Series(out)
+
+
 
 # =========================
 # GEOS safety for NaN/Inf coords
@@ -367,6 +499,46 @@ def one_hot_tags(df: pd.DataFrame, col: str, tags: list[str], prefix: str) -> pd
     return out
 
 
+ALL_STATUSES = [
+    "Greenland",
+    "Land Cleared",
+    "Prior Construction",
+    "Excavation",
+    "Materials Dumped",
+    "Materials Introduced",
+    "Construction Started",
+    "Construction Midway",
+    "Construction Done",
+    "Operational",
+]
+
+def add_status_onehots_per_date(df: pd.DataFrame, statuses=ALL_STATUSES, n_dates=5) -> pd.DataFrame:
+    """
+    Create 0/1 flags: status_<STATUS>_date<i> for i=0..4.
+    Example: status_Land_Cleared_date3
+    Unknown / NaN -> all zeros.
+    """
+    out = df.copy()
+
+    def norm_status(x):
+        if pd.isna(x):
+            return None
+        return str(x).strip()
+
+    for i in range(n_dates):
+        col = f"change_status_date{i}"
+        if col not in out.columns:
+            continue
+
+        s = out[col].map(norm_status)
+
+        for st in statuses:
+            st_safe = st.replace(" ", "_")
+            out[f"status_{st_safe}_date{i}"] = (s == st).astype("int8")
+
+    return out
+
+
 
 # =========================
 # 5) Preprocess one file
@@ -437,6 +609,14 @@ def preprocess_geojson(path: str, is_train: bool) -> pd.DataFrame:
     print("Temporal reorder + timeline...")
     gdf = process_columns(gdf)                 # img_*_date1..5 -> img_*_date0..4
     gdf = reorder_dates(gdf, errors="coerce")  # clean reorder blocks date0..4
+
+    time_features = gdf.apply(process_time_between_statuses, axis=1)
+
+    # NEW: 50 status flags (5 dates x 10 statuses)
+    gdf = add_status_onehots_per_date(gdf)
+
+    gdf = pd.concat([gdf, time_features], axis=1)
+
     timeline_features = gdf.apply(process_timeline, axis=1)
     gdf = pd.concat([gdf, timeline_features], axis=1)
 
