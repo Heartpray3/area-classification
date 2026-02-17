@@ -2,7 +2,7 @@
 preprocess_train_test_parquet.py
 
 Train + Test GeoJSON -> Parquet (ONLY parquet)
-- Fix GEOSException convex_hull (NaN/Inf coords) via filtering + safe convex area
+- Fix GEOSException convex_hull (NaN/Inf coords) via placeholder geometry + safe convex area
 - process_columns(): img_*_date1..5 -> img_*_date0..4
 - reorder_dates(): CLEAN (date0..4 + reorder all *date0..4 blocks)
 - timeline features (uses img_*_date0..4)
@@ -19,7 +19,9 @@ import re
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+from shapely.geometry import Point
 from shapely.validation import make_valid
+
 
 ALL_STATUSES = [
     "Greenland",
@@ -77,12 +79,29 @@ def process_time_between_statuses(row, max_points=5) -> pd.Series:
     out["prior_construction_present"] = 0
     out["prior_construction_before_cleared"] = 0
 
+    # Fréquence de changement de status entre dates consécutives + temps entre changements
+    out["change_status_frequency"] = 0  # nb d'intervalles (date_i -> date_i+1) où le statut change
+    for k in range(max_points - 1):
+        out[f"days_if_change_{k}_{k+1}"] = 0.0  # 0 si pas de changement, sinon nb de jours
+
     for a in ALL_STATUSES:
         for b in ALL_STATUSES:
             out[f"tr_{a.replace(' ', '_')}_to_{b.replace(' ', '_')}"] = 0
 
     if not timeline:
         return pd.Series(out)
+
+    # Encoder fréquence de changement et temps entre changements (sur les dates brutes, pas comp)
+    n = len(timeline)
+    for i in range(n - 1):
+        dt_i, st_i = timeline[i]
+        dt_next, st_next = timeline[i + 1]
+        status_changed = st_i != st_next
+        days_between = float((dt_next - dt_i).days)
+        if status_changed:
+            out["change_status_frequency"] += 1
+            out[f"days_if_change_{i}_{i+1}"] = max(days_between, 0.0)
+        # sinon days_if_change reste 0
 
     comp = [timeline[0]]
     for dt, st in timeline[1:]:
@@ -393,47 +412,6 @@ def process_timeline(row):
 
     return pd.Series(res)
 
-def add_color_transition_velocity_features(df):
-    """
-    Crée 48 colonnes : 24 de deltas et 24 de vélocité (delta / jours).
-    Transitions entre les dates 1, 2, 3, 4 et 5.
-    """
-    channels = ['red', 'green', 'blue']
-    metrics = ['mean', 'std']
-    
-    # Assurer que les dates sont au format datetime pour le calcul
-    for d in range(5):
-        df[f'date{d}'] = pd.to_datetime(df[f'date{d}'], errors='coerce')
-    
-    # Parcourir les 4 transitions (1->2, 2->3, 3->4, 4->5)
-    for i in range(0, 4):
-        j = i + 1
-        
-        # Calcul de l'intervalle en jours (Δt)
-        # Rappel : img_..._date1 correspond à la colonne date0
-        delta_days = (df[f'date{j}'] - df[f'date{i}']).dt.days
-        # Remplacer 0 par 1 pour éviter la division par zéro si deux dates sont identiques
-        delta_days = delta_days.replace(0, 1)
-        
-        for metric in metrics:
-            for channel in channels:
-                col_i = f'img_{channel}_{metric}_date{i}'
-                col_j = f'img_{channel}_{metric}_date{j}'
-                
-                delta_name = f'delta_{metric}_{channel}_{i}_{j}'
-                vel_name = f'vel_{metric}_{channel}_{i}_{j}'
-                
-                if col_i in df.columns and col_j in df.columns:
-                    # 1. Calcul du Delta (Variation brute)
-                    df[delta_name] = df[col_j] - df[col_i]
-                    
-                    # 2. Calcul de la Vélocité (Vitesse de changement par jour)
-                    df[vel_name] = df[delta_name] / delta_days
-                
-    return df
-
-
-
 
 # =========================
 # 4) One-hot tags CLEAN (ignore N/A/N,A)
@@ -570,11 +548,13 @@ def preprocess_geojson(path: str, is_train: bool) -> pd.DataFrame:
         lambda geom: make_valid(geom) if (geom is not None and hasattr(geom, "is_valid") and not geom.is_valid) else geom
     )
 
-    # Drop NaN/Inf coords (prevents GEOS crashes: convex_hull, to_crs, etc.)
+    # Remplacer les géométries NaN/Inf par un point sûr (on garde la ligne, features spatiales à 0)
     bad = gdf["geometry"].apply(_geom_has_nonfinite_coords)
     if bad.any():
-        print(f"(Warn) Dropping {int(bad.sum())} geometries with NaN/Inf coords")
-        gdf = gdf.loc[~bad].copy()
+        n_bad = int(bad.sum())
+        print(f"(Warn) Replacing {n_bad} geometry/ies with NaN/Inf coords by safe placeholder (row kept)")
+        safe_geom = Point(0.0, 0.0)  # WGS84, évite les crashs GEOS (to_crs, convex_hull, etc.)
+        gdf.loc[bad, "geometry"] = safe_geom
 
     # Target
     if is_train:
@@ -632,12 +612,6 @@ def preprocess_geojson(path: str, is_train: bool) -> pd.DataFrame:
     # Urban / Geo derived features
     print("Urban/Geo derived features...")
     gdf = add_urban_geo_features(gdf)
-
-    # -- Ajout des COULEURS ET VÉLOCITÉ ---
-    print('Ajout des features de couleur et vélocité...')
-    gdf = add_color_transition_velocity_features(gdf)
-
-    
 
     # One-hot tags clean (NO N/A/N,A cols)
     print("One-hot tags clean...")
