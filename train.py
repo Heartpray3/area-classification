@@ -3,7 +3,6 @@ train.py - 3-fold CV + train final + submission
 (compatible with older xgboost versions + avoids pandas/QuantileDMatrix crash)
 
 - 3-fold Stratified CV
-- Handles class imbalance via sample_weight="balanced"
 - No early stopping (your xgboost doesn't support early_stopping_rounds/callbacks in sklearn API)
 - Avoids XGBoostError from QuantileDMatrix/columnar by converting X/X_test to numpy float32
 Outputs:
@@ -23,7 +22,6 @@ from sklearn.metrics import (
     confusion_matrix,
     balanced_accuracy_score,
 )
-from sklearn.utils.class_weight import compute_sample_weight
 
 from xgboost import XGBClassifier
 
@@ -121,8 +119,20 @@ for c in train_df.columns:
         if c in test_df.columns:
             STATUS_FLAG_COLS.append(c)
 
-# Final feature list
+# Final feature list (toutes les features du preprocess)
 FEATURE_COLS = GEOM_COLS + ONEHOT_COLS + URB_GEO_COLS + IMG_COLS + TIME_COLS + STATUS_FLAG_COLS
+
+# Rattrapage : toute colonne numérique (train+test) hors target, pas déjà incluse
+numeric_candidates = [
+    c for c in train_df.columns
+    if c != TARGET_COL and c in test_df.columns
+    and pd.api.types.is_numeric_dtype(train_df[c])
+    and c not in FEATURE_COLS
+]
+if numeric_candidates:
+    FEATURE_COLS = FEATURE_COLS + numeric_candidates
+    print(f"[Info] Added {len(numeric_candidates)} numeric column(s) from preprocess not in groups: {numeric_candidates[:15]}{'...' if len(numeric_candidates) > 15 else ''}")
+
 if not FEATURE_COLS:
     raise ValueError("No features selected — check your parquet columns.")
 
@@ -210,11 +220,8 @@ for fold, (tr_idx, va_idx) in enumerate(skf.split(X_np, y), 1):
     X_tr, X_va = X_np[tr_idx], X_np[va_idx]
     y_tr, y_va = y[tr_idx], y[va_idx]
 
-    # Class imbalance weights
-    w_tr = compute_sample_weight(class_weight="balanced", y=y_tr)
-
     clf = XGBClassifier(**cv_params)
-    clf.fit(X_tr, y_tr, sample_weight=w_tr)
+    clf.fit(X_tr, y_tr)
 
     pred = np.argmax(clf.predict_proba(X_va), axis=1)
 
@@ -274,10 +281,8 @@ print("="*55)
 # ---------------------------
 # Train FINAL model on full train + save
 # ---------------------------
-w_full = compute_sample_weight(class_weight="balanced", y=y)
-
 final_clf = XGBClassifier(**model_params)
-final_clf.fit(X_np, y, sample_weight=w_full)
+final_clf.fit(X_np, y)
 
 with open("model.pkl", "wb") as f:
     pickle.dump(final_clf, f)
