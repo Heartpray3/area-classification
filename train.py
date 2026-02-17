@@ -6,13 +6,11 @@ train.py - 3-fold CV + train final + submission
 - No early stopping (your xgboost doesn't support early_stopping_rounds/callbacks in sklearn API)
 - Avoids XGBoostError from QuantileDMatrix/columnar by converting X/X_test to numpy float32
 Outputs:
-- model.pkl
 - submission.csv
 """
 
 import numpy as np
 import pandas as pd
-import pickle
 
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import (
@@ -279,14 +277,10 @@ print("="*55)
 
 
 # ---------------------------
-# Train FINAL model on full train + save
+# Train FINAL model on full train
 # ---------------------------
 final_clf = XGBClassifier(**model_params)
 final_clf.fit(X_np, y)
-
-with open("model.pkl", "wb") as f:
-    pickle.dump(final_clf, f)
-print("[OK] Saved model.pkl")
 
 
 # ---------------------------
