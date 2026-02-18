@@ -20,3 +20,6 @@ model.pkl
 train.geojson
 test.geojson
 
+new_files/train.geojson
+new_files/test.geojson
+new_files/*.geojson
