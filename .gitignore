@@ -19,3 +19,4 @@ model.pkl
 # Optional local datasets
 train.geojson
 test.geojson
+
